@@ -34,9 +34,10 @@ async function transcodeVideo(
   return new Promise((resolve, reject) => {
     const args = [
       "-i", inputPath,
+      "-threads", "0",
       "-vf", `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease,pad=${config.width}:${config.height}:(ow-iw)/2:(oh-ih)/2`,
       "-c:v", "libx264",
-      "-preset", "fast",
+      "-preset", "ultrafast",
       "-crf", "23",
       "-b:v", config.bitrate,
       "-maxrate", config.bitrate,

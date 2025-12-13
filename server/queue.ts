@@ -7,10 +7,14 @@ import { storage } from "./storage";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
+// DEV_MODE: Skip Redis entirely for local development/demo
+// Set DEV_MODE=true or leave REDIS_URL unset to run in simulation mode
+const DEV_MODE = process.env.DEV_MODE === 'true' || !process.env.REDIS_URL;
+
 let connection: IORedis | null = null;
 let transcodingQueue: Queue | null = null;
 let redisAvailable = false;
-let redisCheckDone = false;
+let redisCheckDone = DEV_MODE; // If DEV_MODE, mark as already checked (unavailable)
 
 export const eventEmitter = new EventEmitter();
 
@@ -23,6 +27,15 @@ export interface TranscodingJobData {
 }
 
 export function getRedisConnection(): IORedis | null {
+  // In DEV_MODE, skip Redis entirely - use simulation mode
+  if (DEV_MODE) {
+    if (!redisCheckDone) {
+      console.log("DEV_MODE enabled: Running without Redis (simulation mode)");
+      redisCheckDone = true;
+    }
+    return null;
+  }
+  
   // If we've already determined Redis is unavailable, return null immediately
   if (redisCheckDone && !redisAvailable) {
     return null;

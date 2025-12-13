@@ -54,6 +54,7 @@
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "framer-motion": "^11.13.1",
+    "hls.js": "^1.6.15",
     "input-otp": "^1.4.2",
     "ioredis": "^5.8.2",
     "lucide-react": "^0.453.0",

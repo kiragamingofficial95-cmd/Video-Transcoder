@@ -197,7 +197,10 @@ Response: TS Segment
 PORT=5000
 NODE_ENV=development
 
-# Redis (optional - falls back to in-memory simulation)
+# Development Mode (set to 'true' to skip Redis entirely)
+DEV_MODE=true
+
+# Redis (optional - falls back to in-memory simulation if DEV_MODE=true or unset)
 REDIS_URL=redis://localhost:6379
 
 # Storage
@@ -206,6 +209,52 @@ STORAGE_DIR=./storage
 # Session
 SESSION_SECRET=your-secret-key
 ```
+
+## Requirement Validation Checklist
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Chunked video uploads | Done | 10MB chunks, parallel uploads, resumable |
+| Multi-resolution transcoding | Done | 360p, 720p, 1080p via FFmpeg |
+| HLS streaming output | Done | .m3u8 playlists + .ts segments |
+| Event-driven architecture | Done | WebSocket + Redis pub/sub events |
+| Redis/BullMQ job queue | Done | With DEV_MODE fallback simulation |
+| Real-time progress updates | Done | WebSocket broadcasts to all clients |
+| Video status tracking | Done | pending/uploading/transcoding/completed/error |
+| Cross-browser HLS playback | Done | hls.js for Chrome/Firefox, native for Safari |
+
+## Deployment Options
+
+### Render Deployment
+
+1. **Create services on Render:**
+   - Web Service for API (Node.js)
+   - Background Worker for transcoding
+   - Redis instance
+
+2. **Configure environment:**
+   ```
+   NODE_ENV=production
+   REDIS_URL=<your-redis-url>
+   STORAGE_DIR=/data
+   SESSION_SECRET=<generate-secure-secret>
+   ```
+
+3. **Build command:** `npm ci && npm run build`
+4. **Start command:** `node dist/server/index.js`
+
+### Vercel Deployment
+
+1. **API Routes:** Deploy as serverless functions
+2. **Note:** Vercel has execution time limits; use external Redis and consider separate worker deployment
+3. **Configure:** Add REDIS_URL and other env vars in Vercel dashboard
+
+### Railway Deployment
+
+1. **Connect GitHub repo**
+2. **Add Redis plugin**
+3. **Set environment variables**
+4. **Deploy API and worker as separate services**
 
 ## Running Locally
 
@@ -300,9 +349,10 @@ This demo is designed to run within Replit's free-tier constraints:
    - Simulated transcoding runs in-process instead of separate workers
    - Events still propagate via WebSocket for real-time UI updates
    
-2. **No FFmpeg**: HLS transcoding is simulated
+2. **DEV_MODE Simulation**: When DEV_MODE=true or REDIS_URL is unset
+   - Transcoding runs in-process with simulated progress
    - Progress events are emitted to demonstrate the event-driven architecture
-   - In production, actual FFmpeg workers would generate HLS segments
+   - In production with Redis, actual FFmpeg workers generate HLS segments
    
 3. **Ephemeral Storage**: Files lost on restart
    - Uploaded videos and transcoded output stored in local `/storage` directory
