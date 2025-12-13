@@ -2,7 +2,8 @@ import { Queue, Worker, Job } from "bullmq";
 import IORedis from "ioredis";
 import { EventEmitter } from "events";
 import type { ResolutionType } from "@shared/schema";
-import { Resolution, EventType } from "@shared/schema";
+import { Resolution, EventType, VideoStatus } from "@shared/schema";
+import { storage } from "./storage";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
@@ -104,6 +105,10 @@ export async function addTranscodingJobs(
 async function simulateTranscoding(jobData: TranscodingJobData): Promise<void> {
   const { videoId, jobId, resolution } = jobData;
   
+  // Update video status to transcoding
+  await storage.updateVideo(videoId, { status: VideoStatus.TRANSCODING });
+  await storage.updateTranscodingJob(jobId, { status: "processing", startedAt: new Date().toISOString() });
+  
   emitEvent(EventType.TRANSCODING_PROGRESS, videoId, { 
     resolution, 
     progress: 0,
@@ -115,6 +120,16 @@ async function simulateTranscoding(jobData: TranscodingJobData): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 500));
     
     const progress = (i / steps) * 100;
+    
+    // Update transcoding progress in storage
+    const video = await storage.getVideo(videoId);
+    if (video) {
+      const currentProgress = video.transcodingProgress || {};
+      currentProgress[resolution] = progress;
+      await storage.updateVideo(videoId, { transcodingProgress: currentProgress });
+    }
+    await storage.updateTranscodingJob(jobId, { progress });
+    
     emitEvent(EventType.TRANSCODING_PROGRESS, videoId, {
       resolution,
       progress,
@@ -122,10 +137,41 @@ async function simulateTranscoding(jobData: TranscodingJobData): Promise<void> {
     });
   }
   
+  const hlsUrl = `/api/stream/${videoId}/${resolution}/playlist.m3u8`;
+  
+  // Update job and video with completion
+  await storage.updateTranscodingJob(jobId, { 
+    status: "completed", 
+    progress: 100,
+    outputPath: hlsUrl,
+    completedAt: new Date().toISOString(),
+  });
+  
+  // Update video HLS URLs and check if all resolutions are done
+  const video = await storage.getVideo(videoId);
+  if (video) {
+    const currentHlsUrls = video.hlsUrls || {};
+    currentHlsUrls[resolution] = hlsUrl;
+    
+    const currentProgress = video.transcodingProgress || {};
+    currentProgress[resolution] = 100;
+    
+    // Check if all resolutions are completed
+    const allResolutions: ResolutionType[] = [Resolution.R360P, Resolution.R720P, Resolution.R1080P];
+    const allCompleted = allResolutions.every(r => currentProgress[r] === 100);
+    
+    await storage.updateVideo(videoId, {
+      hlsUrls: currentHlsUrls,
+      transcodingProgress: currentProgress,
+      status: allCompleted ? VideoStatus.COMPLETED : VideoStatus.TRANSCODING,
+      completedAt: allCompleted ? new Date().toISOString() : undefined,
+    });
+  }
+  
   emitEvent(EventType.TRANSCODING_COMPLETED, videoId, {
     resolution,
     jobId,
-    hlsUrl: `/api/stream/${videoId}/${resolution}/playlist.m3u8`,
+    hlsUrl,
   });
 }
 

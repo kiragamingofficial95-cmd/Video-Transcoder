@@ -292,6 +292,62 @@ volumes:
 
 ## Trade-offs & Limitations
 
+### Free-Tier Limitations
+
+This demo is designed to run within Replit's free-tier constraints:
+
+1. **No Redis Available**: Falls back to in-memory simulation mode for job queuing
+   - Simulated transcoding runs in-process instead of separate workers
+   - Events still propagate via WebSocket for real-time UI updates
+   
+2. **No FFmpeg**: HLS transcoding is simulated
+   - Progress events are emitted to demonstrate the event-driven architecture
+   - In production, actual FFmpeg workers would generate HLS segments
+   
+3. **Ephemeral Storage**: Files lost on restart
+   - Uploaded videos and transcoded output stored in local `/storage` directory
+   - In production, use S3/GCS with presigned URLs
+
+4. **Single Process**: API server and simulated workers run together
+   - In production, workers run as separate scalable processes
+
+### How This Scales in Production
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Production Deployment (Kubernetes / Cloud Run)                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐    │
+│  │ Load Balancer│────▶│ API Pod × N  │────▶│ Redis Cluster│    │
+│  └──────────────┘     └──────────────┘     └──────────────┘    │
+│                                                   │             │
+│                              ┌────────────────────┘             │
+│                              ▼                                  │
+│  ┌──────────────────────────────────────────────────────┐      │
+│  │              GPU Worker Pods (Auto-scaled)            │      │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  │      │
+│  │  │Worker 1 │  │Worker 2 │  │Worker 3 │  │Worker N │  │      │
+│  │  │ FFmpeg  │  │ FFmpeg  │  │ FFmpeg  │  │ FFmpeg  │  │      │
+│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘  │      │
+│  └──────────────────────────────────────────────────────┘      │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐    │
+│  │     S3/GCS   │     │   CDN/Edge   │     │  PostgreSQL  │    │
+│  │   (Storage)  │────▶│  (Delivery)  │     │  (Metadata)  │    │
+│  └──────────────┘     └──────────────┘     └──────────────┘    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Scaling Strategies:**
+- **Horizontal API Scaling**: Stateless API servers behind load balancer
+- **Worker Autoscaling**: Scale GPU workers based on queue depth
+- **Storage**: S3/GCS with presigned URLs for direct upload/download
+- **CDN**: CloudFront/Fastly for global video delivery
+- **Database**: PostgreSQL for metadata, Redis Cluster for queues
+
 ### Current Demo Limitations
 
 1. **In-Memory Storage**: Videos lost on restart (production: use database)

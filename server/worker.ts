@@ -144,6 +144,20 @@ async function publishFailure(
   await redis.publish("video-events", JSON.stringify(event));
 }
 
+/**
+ * Worker for real Redis+BullMQ deployments.
+ * 
+ * NOTE: This worker publishes events via Redis pub/sub but cannot update
+ * the in-memory storage (since it runs as a separate process).
+ * 
+ * For production deployments:
+ * - Replace MemStorage with PostgreSQL/MongoDB for shared state
+ * - Worker would update the database directly
+ * - Or use Redis pub/sub to notify the API server to update storage
+ * 
+ * In the Replit free-tier demo (no Redis), the simulateTranscoding function
+ * in queue.ts handles everything in-process, updating storage directly.
+ */
 export function startWorker(): void {
   console.log("Starting transcoding worker...");
   

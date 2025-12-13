@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Header } from "@/components/Header";
 import { UploadZone } from "@/components/UploadZone";
 import { VideoCard } from "@/components/VideoCard";
@@ -9,15 +9,46 @@ import { EmptyState } from "@/components/EmptyState";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card } from "@/components/ui/card";
 import { useUpload } from "@/hooks/useUpload";
+import { useSocket } from "@/hooks/useSocket";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import type { Video, QueueStats as QueueStatsType, ResolutionType } from "@shared/schema";
+import type { Video, QueueStats as QueueStatsType, ResolutionType, VideoEvent } from "@shared/schema";
+import { EventType } from "@shared/schema";
 
 export default function Dashboard() {
   const { toast } = useToast();
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [selectedResolution, setSelectedResolution] = useState<ResolutionType | undefined>();
   const [playerOpen, setPlayerOpen] = useState(false);
+
+  // Handle real-time WebSocket events for live updates
+  const handleGlobalEvent = useCallback((event: VideoEvent) => {
+    // Refresh data on transcoding events
+    if (event.type === EventType.TRANSCODING_PROGRESS || 
+        event.type === EventType.TRANSCODING_COMPLETED ||
+        event.type === EventType.TRANSCODING_FAILED) {
+      queryClient.invalidateQueries({ queryKey: ["/api/videos"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/queue/stats"] });
+    }
+    
+    if (event.type === EventType.TRANSCODING_COMPLETED) {
+      toast({
+        title: "Transcoding complete",
+        description: `Resolution ${event.data?.resolution} is ready`,
+      });
+    }
+    
+    if (event.type === EventType.TRANSCODING_FAILED) {
+      toast({
+        title: "Transcoding failed",
+        description: `Resolution ${event.data?.resolution} failed: ${event.data?.error}`,
+        variant: "destructive",
+      });
+    }
+  }, [toast]);
+
+  // Connect to WebSocket for real-time updates
+  useSocket({ onGlobalEvent: handleGlobalEvent });
 
   const { 
     progress, 
