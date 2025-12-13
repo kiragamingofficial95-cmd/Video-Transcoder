@@ -3,7 +3,8 @@ import { createServer, type Server } from "http";
 import multer from "multer";
 import path from "path";
 import fs from "fs/promises";
-import { existsSync, mkdirSync, createReadStream, statSync } from "fs";
+import { existsSync, mkdirSync, createReadStream, createWriteStream, statSync } from "fs";
+import { pipeline } from "stream/promises";
 import { storage } from "./storage";
 import { setupWebSocket } from "./websocket";
 import { addTranscodingJobs, emitEvent, getQueueStats } from "./queue";
@@ -143,21 +144,68 @@ export async function registerRoutes(
       const outputPath = path.join(UPLOADS_DIR, `${session.videoId}${path.extname(session.filename)}`);
       const sessionChunksDir = path.join(CHUNKS_DIR, sessionId);
       
-      const writeStream = require("fs").createWriteStream(outputPath);
-      
+      // Verify all chunks exist before starting reassembly
+      const missingChunks: number[] = [];
       for (let i = 0; i < session.totalChunks; i++) {
         const chunkPath = path.join(sessionChunksDir, `chunk_${i}`);
-        const chunkData = await fs.readFile(chunkPath);
-        writeStream.write(chunkData);
+        if (!existsSync(chunkPath)) {
+          missingChunks.push(i);
+        }
       }
       
-      await new Promise<void>((resolve, reject) => {
-        writeStream.end((err: Error | null) => {
-          if (err) reject(err);
-          else resolve();
+      if (missingChunks.length > 0) {
+        return res.status(400).json({
+          error: "Missing chunk files",
+          missingChunks: missingChunks.slice(0, 10), // Return first 10 missing
+          totalMissing: missingChunks.length,
         });
-      });
+      }
 
+      // Stream chunks to output file with proper backpressure handling
+      const writeStream = createWriteStream(outputPath, { highWaterMark: 64 * 1024 });
+      
+      // Helper to stream a single chunk with proper backpressure
+      const streamChunk = (chunkPath: string): Promise<void> => {
+        return new Promise((resolve, reject) => {
+          const readStream = createReadStream(chunkPath, { highWaterMark: 64 * 1024 });
+          
+          readStream.on("error", (err) => {
+            readStream.destroy();
+            reject(err);
+          });
+          
+          readStream.on("data", (chunk: Buffer) => {
+            const canContinue = writeStream.write(chunk);
+            if (!canContinue) {
+              // Pause reading until write buffer drains
+              readStream.pause();
+              writeStream.once("drain", () => readStream.resume());
+            }
+          });
+          
+          readStream.on("end", () => resolve());
+        });
+      };
+      
+      try {
+        for (let i = 0; i < session.totalChunks; i++) {
+          const chunkPath = path.join(sessionChunksDir, `chunk_${i}`);
+          await streamChunk(chunkPath);
+        }
+        
+        // Close the write stream and wait for all data to flush
+        await new Promise<void>((resolve, reject) => {
+          writeStream.on("error", reject);
+          writeStream.end(() => resolve());
+        });
+      } catch (streamError) {
+        // Clean up on error
+        writeStream.destroy();
+        await fs.unlink(outputPath).catch(() => {});
+        throw streamError;
+      }
+
+      // Clean up chunks after successful reassembly
       await fs.rm(sessionChunksDir, { recursive: true, force: true });
 
       await storage.updateUploadSession(sessionId, { status: "completed" });
