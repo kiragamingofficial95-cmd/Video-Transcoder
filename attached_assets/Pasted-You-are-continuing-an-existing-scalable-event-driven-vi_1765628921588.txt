@@ -1,0 +1,126 @@
+You are continuing an existing scalable, event-driven
+video transcoding platform project.
+
+DO NOT redesign the system.
+DO NOT remove queues, events, or FFmpeg.
+DO NOT integrate paid cloud services.
+
+────────────────────────────────────
+PRIMARY GOAL (MANDATORY)
+────────────────────────────────────
+VERIFY that this project EXACTLY MATCHES
+the CLIENT REQUIREMENTS below.
+
+CLIENT EXPECTATIONS:
+- Backend-heavy system
+- Chunked & resumable uploads
+- Event-driven architecture
+- Queue-based processing
+- Video transcoding pipeline
+- Scalable design (YouTube-like)
+- Backend deployable on Render
+- Frontend deployable on Vercel
+
+You MUST explicitly confirm this in README.
+
+────────────────────────────────────
+1) REQUIREMENT VALIDATION (FIRST TASK)
+────────────────────────────────────
+Before changing code:
+- Review the entire codebase
+- Verify each client requirement is met
+- Create a checklist mapping:
+  CLIENT REQUIREMENT → CODE LOCATION
+- If something is missing or weak, FIX IT
+
+────────────────────────────────────
+2) REDIS & QUEUE HANDLING (IMPORTANT)
+────────────────────────────────────
+Known constraint:
+- Redis is NOT available on Replit free tier
+
+Required solution:
+- Implement a DEV MODE fallback:
+  - In-memory queue or mock queue
+- Keep Redis-based BullMQ code intact
+- Switch behavior using environment variables
+
+Example:
+- DEV_MODE=true → in-memory queue
+- PROD_MODE → Redis
+
+Document:
+- How Redis will be connected on Render
+- Why this is production-correct
+
+────────────────────────────────────
+3) TRANSCODING SPEED OPTIMIZATION
+────────────────────────────────────
+Within CPU limits:
+- Use FFmpeg fast/ultrafast presets
+- Enable multithreading
+- Optimize CRF and bitrate
+- Process lower resolutions first
+- Parallelize where safe
+
+Document all optimizations.
+
+────────────────────────────────────
+4) PREVIEW PLAYBACK FIX (CRITICAL)
+────────────────────────────────────
+Fix 360p preview issues:
+- Validate HLS playlist paths
+- Serve `.m3u8` and `.ts` with correct MIME types
+- Use hls.js in frontend when needed
+- Ensure preview works reliably
+
+────────────────────────────────────
+5) DOWNLOAD PREVIEW DECISION
+────────────────────────────────────
+- Download is OPTIONAL
+- Either:
+  a) Implement download for a resolution
+  b) Explicitly document why it's disabled
+Both are acceptable if justified.
+
+────────────────────────────────────
+6) DEPLOYMENT READINESS CHECK
+────────────────────────────────────
+Verify code is deployable as:
+- Backend: Render (Docker-based)
+- Frontend: Vercel
+
+Ensure:
+- No hardcoded URLs
+- API base URL via env variables
+- Proper CORS handling
+- Clear deployment steps in README
+
+────────────────────────────────────
+7) FINAL VALIDATION
+────────────────────────────────────
+- Test full flow with small video
+- Simulate large video behavior
+- Log estimated processing time
+- Confirm status updates and previews
+
+────────────────────────────────────
+8) DOCUMENTATION UPDATE
+────────────────────────────────────
+README MUST include:
+- Requirement validation checklist
+- Architecture diagram
+- Redis fallback explanation
+- Free-tier limitations
+- Production scaling strategy
+- Render + Vercel deployment steps
+
+RULES
+────────────────────────────────────
+- Keep architecture intact
+- Fix only what is necessary
+- Act like a senior backend engineer
+- If something is simulated, DOCUMENT IT
+
+Begin by validating the system against
+client expectations before coding.
