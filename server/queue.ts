@@ -9,6 +9,8 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
 let connection: IORedis | null = null;
 let transcodingQueue: Queue | null = null;
+let redisAvailable = false;
+let redisCheckDone = false;
 
 export const eventEmitter = new EventEmitter();
 
@@ -21,14 +23,22 @@ export interface TranscodingJobData {
 }
 
 export function getRedisConnection(): IORedis | null {
+  // If we've already determined Redis is unavailable, return null immediately
+  if (redisCheckDone && !redisAvailable) {
+    return null;
+  }
+  
   if (!connection) {
     try {
       connection = new IORedis(REDIS_URL, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
+        lazyConnect: true,
         retryStrategy: (times) => {
           if (times > 3) {
             console.log("Redis connection failed, running without queue system");
+            redisAvailable = false;
+            redisCheckDone = true;
             return null;
           }
           return Math.min(times * 100, 3000);
@@ -37,17 +47,31 @@ export function getRedisConnection(): IORedis | null {
       
       connection.on("error", (err) => {
         console.log("Redis connection error (non-fatal):", err.message);
+        redisAvailable = false;
+        redisCheckDone = true;
       });
       
       connection.on("connect", () => {
         console.log("Connected to Redis");
+        redisAvailable = true;
+        redisCheckDone = true;
+      });
+      
+      // Try to connect - don't wait for it
+      connection.connect().catch(() => {
+        redisAvailable = false;
+        redisCheckDone = true;
       });
     } catch (err) {
       console.log("Redis not available, running in demo mode");
+      redisAvailable = false;
+      redisCheckDone = true;
       return null;
     }
   }
-  return connection;
+  
+  // Return connection only if Redis is confirmed available
+  return redisAvailable ? connection : null;
 }
 
 export function getTranscodingQueue(): Queue<TranscodingJobData> | null {
