@@ -1,6 +1,9 @@
 import { Queue, Worker, Job } from "bullmq";
 import IORedis from "ioredis";
 import { EventEmitter } from "events";
+import { spawn } from "child_process";
+import path from "path";
+import { existsSync, mkdirSync } from "fs";
 import type { ResolutionType } from "@shared/schema";
 import { Resolution, EventType, VideoStatus } from "@shared/schema";
 import { storage } from "./storage";
@@ -139,8 +142,115 @@ export async function addTranscodingJobs(
   emitEvent(EventType.TRANSCODING_STARTED, videoId, { resolutions });
 }
 
+const RESOLUTION_CONFIG: Record<ResolutionType, { width: number; height: number; bitrate: string }> = {
+  [Resolution.R360P]: { width: 640, height: 360, bitrate: "800k" },
+  [Resolution.R720P]: { width: 1280, height: 720, bitrate: "2500k" },
+  [Resolution.R1080P]: { width: 1920, height: 1080, bitrate: "5000k" },
+};
+
+// Check if FFmpeg is available
+let ffmpegAvailable: boolean | null = null;
+async function checkFfmpegAvailable(): Promise<boolean> {
+  if (ffmpegAvailable !== null) return ffmpegAvailable;
+  
+  return new Promise((resolve) => {
+    const check = spawn("ffmpeg", ["-version"]);
+    check.on("error", () => {
+      console.log("FFmpeg not available - preview/playback will not work until videos are transcoded with Redis worker");
+      ffmpegAvailable = false;
+      resolve(false);
+    });
+    check.on("close", (code) => {
+      ffmpegAvailable = code === 0;
+      if (ffmpegAvailable) {
+        console.log("FFmpeg detected - real transcoding enabled");
+      }
+      resolve(ffmpegAvailable);
+    });
+  });
+}
+
+async function transcodeVideoFile(
+  inputPath: string,
+  outputDir: string,
+  resolution: ResolutionType,
+  onProgress: (progress: number) => void
+): Promise<string> {
+  const config = RESOLUTION_CONFIG[resolution];
+  const resolutionDir = path.join(outputDir, resolution);
+  
+  if (!existsSync(resolutionDir)) {
+    mkdirSync(resolutionDir, { recursive: true });
+  }
+
+  const playlistPath = path.join(resolutionDir, "playlist.m3u8");
+  const segmentPath = path.join(resolutionDir, "segment_%03d.ts");
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-i", inputPath,
+      "-threads", "0",
+      "-vf", `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease,pad=${config.width}:${config.height}:(ow-iw)/2:(oh-ih)/2`,
+      "-c:v", "libx264",
+      "-preset", "ultrafast",
+      "-crf", "23",
+      "-b:v", config.bitrate,
+      "-maxrate", config.bitrate,
+      "-bufsize", `${parseInt(config.bitrate) * 2}k`,
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-ar", "44100",
+      "-f", "hls",
+      "-hls_time", "4",
+      "-hls_list_size", "0",
+      "-hls_segment_filename", segmentPath,
+      "-progress", "pipe:1",
+      "-y",
+      playlistPath,
+    ];
+
+    const ffmpeg = spawn("ffmpeg", args);
+    let duration = 0;
+    let currentTime = 0;
+
+    ffmpeg.stderr.on("data", (data: Buffer) => {
+      const output = data.toString();
+      
+      const durationMatch = output.match(/Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})/);
+      if (durationMatch) {
+        const [, hours, minutes, seconds] = durationMatch;
+        duration = parseInt(hours) * 3600 + parseInt(minutes) * 60 + parseInt(seconds);
+      }
+    });
+
+    ffmpeg.stdout.on("data", (data: Buffer) => {
+      const output = data.toString();
+      
+      const timeMatch = output.match(/out_time_ms=(\d+)/);
+      if (timeMatch && duration > 0) {
+        currentTime = parseInt(timeMatch[1]) / 1000000;
+        const progress = Math.min((currentTime / duration) * 100, 99);
+        onProgress(progress);
+      }
+    });
+
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        onProgress(100);
+        resolve(playlistPath);
+      } else {
+        reject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    });
+
+    ffmpeg.on("error", (error) => {
+      reject(error);
+    });
+  });
+}
+
 async function simulateTranscoding(jobData: TranscodingJobData): Promise<void> {
-  const { videoId, jobId, resolution } = jobData;
+  const { videoId, jobId, resolution, inputPath, outputDir } = jobData;
   
   // Update video status to transcoding
   await storage.updateVideo(videoId, { status: VideoStatus.TRANSCODING });
@@ -151,65 +261,122 @@ async function simulateTranscoding(jobData: TranscodingJobData): Promise<void> {
     progress: 0,
     jobId,
   });
+
+  // Check if FFmpeg is available for real transcoding
+  const hasFfmpeg = await checkFfmpegAvailable();
   
-  const steps = 10;
-  for (let i = 1; i <= steps; i++) {
-    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 500));
+  if (!hasFfmpeg) {
+    // Fallback: Show clear error since preview requires actual files
+    console.error(`Cannot transcode ${resolution} for ${videoId}: FFmpeg not available`);
     
-    const progress = (i / steps) * 100;
-    
-    // Update transcoding progress in storage
-    const video = await storage.getVideo(videoId);
-    if (video) {
-      const currentProgress = video.transcodingProgress || {};
-      currentProgress[resolution] = progress;
-      await storage.updateVideo(videoId, { transcodingProgress: currentProgress });
-    }
-    await storage.updateTranscodingJob(jobId, { progress });
-    
-    emitEvent(EventType.TRANSCODING_PROGRESS, videoId, {
-      resolution,
-      progress,
-      jobId,
+    await storage.updateTranscodingJob(jobId, { 
+      status: "failed", 
+      completedAt: new Date().toISOString(),
     });
-  }
-  
-  const hlsUrl = `/api/stream/${videoId}/${resolution}/playlist.m3u8`;
-  
-  // Update job and video with completion
-  await storage.updateTranscodingJob(jobId, { 
-    status: "completed", 
-    progress: 100,
-    outputPath: hlsUrl,
-    completedAt: new Date().toISOString(),
-  });
-  
-  // Update video HLS URLs and check if all resolutions are done
-  const video = await storage.getVideo(videoId);
-  if (video) {
-    const currentHlsUrls = video.hlsUrls || {};
-    currentHlsUrls[resolution] = hlsUrl;
-    
-    const currentProgress = video.transcodingProgress || {};
-    currentProgress[resolution] = 100;
-    
-    // Check if all resolutions are completed
-    const allResolutions: ResolutionType[] = [Resolution.R360P, Resolution.R720P, Resolution.R1080P];
-    const allCompleted = allResolutions.every(r => currentProgress[r] === 100);
     
     await storage.updateVideo(videoId, {
-      hlsUrls: currentHlsUrls,
-      transcodingProgress: currentProgress,
-      status: allCompleted ? VideoStatus.COMPLETED : VideoStatus.TRANSCODING,
-      completedAt: allCompleted ? new Date().toISOString() : undefined,
+      status: VideoStatus.FAILED,
+      errorMessage: "FFmpeg not available - install FFmpeg to enable video transcoding",
+    });
+    
+    emitEvent(EventType.TRANSCODING_FAILED, videoId, {
+      resolution,
+      jobId,
+      error: "FFmpeg not available",
+    });
+    return;
+  }
+
+  let lastProgress = 0;
+  
+  try {
+    // Actually transcode the video using FFmpeg
+    await transcodeVideoFile(
+      inputPath,
+      outputDir,
+      resolution,
+      async (progress) => {
+        // Only emit progress updates when progress changes significantly
+        if (progress - lastProgress >= 5 || progress === 100) {
+          lastProgress = progress;
+          
+          // Update transcoding progress in storage
+          const video = await storage.getVideo(videoId);
+          if (video) {
+            const currentProgress = video.transcodingProgress || {};
+            currentProgress[resolution] = progress;
+            await storage.updateVideo(videoId, { transcodingProgress: currentProgress });
+          }
+          await storage.updateTranscodingJob(jobId, { progress });
+          
+          emitEvent(EventType.TRANSCODING_PROGRESS, videoId, {
+            resolution,
+            progress,
+            jobId,
+          });
+        }
+      }
+    );
+    
+    const hlsUrl = `/api/stream/${videoId}/${resolution}/playlist.m3u8`;
+    
+    // Update job and video with completion
+    await storage.updateTranscodingJob(jobId, { 
+      status: "completed", 
+      progress: 100,
+      outputPath: hlsUrl,
+      completedAt: new Date().toISOString(),
+    });
+    
+    // Update video HLS URLs and check if all resolutions are done
+    const video = await storage.getVideo(videoId);
+    if (video) {
+      const currentHlsUrls = video.hlsUrls || {};
+      currentHlsUrls[resolution] = hlsUrl;
+      
+      const currentProgress = video.transcodingProgress || {};
+      currentProgress[resolution] = 100;
+      
+      // Check if all resolutions are completed
+      const allResolutions: ResolutionType[] = [Resolution.R360P, Resolution.R720P, Resolution.R1080P];
+      const allCompleted = allResolutions.every(r => currentProgress[r] === 100);
+      
+      await storage.updateVideo(videoId, {
+        hlsUrls: currentHlsUrls,
+        transcodingProgress: currentProgress,
+        status: allCompleted ? VideoStatus.COMPLETED : VideoStatus.TRANSCODING,
+        completedAt: allCompleted ? new Date().toISOString() : undefined,
+      });
+    }
+    
+    emitEvent(EventType.TRANSCODING_COMPLETED, videoId, {
+      resolution,
+      jobId,
+      hlsUrl,
+    });
+    
+    console.log(`Completed ${resolution} transcoding for ${videoId}`);
+  } catch (error) {
+    console.error(`Transcoding failed for ${resolution}:`, error);
+    
+    // Update job status to failed
+    await storage.updateTranscodingJob(jobId, { 
+      status: "failed", 
+      completedAt: new Date().toISOString(),
+    });
+    
+    // Update video status to failed
+    await storage.updateVideo(videoId, {
+      status: VideoStatus.FAILED,
+      errorMessage: error instanceof Error ? error.message : "Transcoding failed",
+    });
+    
+    emitEvent(EventType.TRANSCODING_FAILED, videoId, {
+      resolution,
+      jobId,
+      error: error instanceof Error ? error.message : "Unknown error",
     });
   }
-  
-  emitEvent(EventType.TRANSCODING_COMPLETED, videoId, {
-    resolution,
-    jobId,
-    hlsUrl,
-  });
 }
 
 export function emitEvent(
