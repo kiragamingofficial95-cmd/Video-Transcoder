@@ -1,0 +1,184 @@
+import { Queue, Worker, Job } from "bullmq";
+import IORedis from "ioredis";
+import { EventEmitter } from "events";
+import type { ResolutionType } from "@shared/schema";
+import { Resolution, EventType } from "@shared/schema";
+
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+
+let connection: IORedis | null = null;
+let transcodingQueue: Queue | null = null;
+
+export const eventEmitter = new EventEmitter();
+
+export interface TranscodingJobData {
+  videoId: string;
+  jobId: string;
+  resolution: ResolutionType;
+  inputPath: string;
+  outputDir: string;
+}
+
+export function getRedisConnection(): IORedis | null {
+  if (!connection) {
+    try {
+      connection = new IORedis(REDIS_URL, {
+        maxRetriesPerRequest: null,
+        enableReadyCheck: false,
+        retryStrategy: (times) => {
+          if (times > 3) {
+            console.log("Redis connection failed, running without queue system");
+            return null;
+          }
+          return Math.min(times * 100, 3000);
+        },
+      });
+      
+      connection.on("error", (err) => {
+        console.log("Redis connection error (non-fatal):", err.message);
+      });
+      
+      connection.on("connect", () => {
+        console.log("Connected to Redis");
+      });
+    } catch (err) {
+      console.log("Redis not available, running in demo mode");
+      return null;
+    }
+  }
+  return connection;
+}
+
+export function getTranscodingQueue(): Queue<TranscodingJobData> | null {
+  const redis = getRedisConnection();
+  if (!redis) return null;
+  
+  if (!transcodingQueue) {
+    transcodingQueue = new Queue<TranscodingJobData>("transcoding", {
+      connection: redis,
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 1000,
+        },
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      },
+    });
+  }
+  return transcodingQueue;
+}
+
+export async function addTranscodingJobs(
+  videoId: string,
+  inputPath: string,
+  outputDir: string,
+  jobIds: Record<ResolutionType, string>
+): Promise<void> {
+  const queue = getTranscodingQueue();
+  
+  const resolutions: ResolutionType[] = [Resolution.R360P, Resolution.R720P, Resolution.R1080P];
+  
+  for (const resolution of resolutions) {
+    const jobData: TranscodingJobData = {
+      videoId,
+      jobId: jobIds[resolution],
+      resolution,
+      inputPath,
+      outputDir,
+    };
+    
+    if (queue) {
+      await queue.add(`transcode-${resolution}`, jobData, {
+        priority: resolution === Resolution.R360P ? 1 : resolution === Resolution.R720P ? 2 : 3,
+      });
+    } else {
+      simulateTranscoding(jobData);
+    }
+  }
+  
+  emitEvent(EventType.TRANSCODING_STARTED, videoId, { resolutions });
+}
+
+async function simulateTranscoding(jobData: TranscodingJobData): Promise<void> {
+  const { videoId, jobId, resolution } = jobData;
+  
+  emitEvent(EventType.TRANSCODING_PROGRESS, videoId, { 
+    resolution, 
+    progress: 0,
+    jobId,
+  });
+  
+  const steps = 10;
+  for (let i = 1; i <= steps; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 500));
+    
+    const progress = (i / steps) * 100;
+    emitEvent(EventType.TRANSCODING_PROGRESS, videoId, {
+      resolution,
+      progress,
+      jobId,
+    });
+  }
+  
+  emitEvent(EventType.TRANSCODING_COMPLETED, videoId, {
+    resolution,
+    jobId,
+    hlsUrl: `/api/stream/${videoId}/${resolution}/playlist.m3u8`,
+  });
+}
+
+export function emitEvent(
+  type: string,
+  videoId: string,
+  data?: Record<string, unknown>
+): void {
+  const event = {
+    type,
+    videoId,
+    data,
+    timestamp: new Date().toISOString(),
+  };
+  
+  eventEmitter.emit("video-event", event);
+  
+  const redis = getRedisConnection();
+  if (redis) {
+    redis.publish("video-events", JSON.stringify(event)).catch(() => {});
+  }
+}
+
+export async function getQueueStats(): Promise<{
+  waiting: number;
+  active: number;
+  completed: number;
+  failed: number;
+}> {
+  try {
+    const queue = getTranscodingQueue();
+    if (!queue) {
+      return { waiting: 0, active: 0, completed: 0, failed: 0 };
+    }
+    
+    const [waiting, active, completed, failed] = await Promise.all([
+      queue.getWaitingCount(),
+      queue.getActiveCount(),
+      queue.getCompletedCount(),
+      queue.getFailedCount(),
+    ]);
+    
+    return { waiting, active, completed, failed };
+  } catch (error) {
+    return { waiting: 0, active: 0, completed: 0, failed: 0 };
+  }
+}
+
+export async function closeQueue(): Promise<void> {
+  if (transcodingQueue) {
+    await transcodingQueue.close();
+  }
+  if (connection) {
+    await connection.quit();
+  }
+}
