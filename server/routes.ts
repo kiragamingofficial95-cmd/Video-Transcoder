@@ -27,16 +27,13 @@ const CHUNK_SIZE = 10 * 1024 * 1024;
 const chunkUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
-      const sessionId = req.body.sessionId;
-      const sessionDir = path.join(CHUNKS_DIR, sessionId);
-      if (!existsSync(sessionDir)) {
-        mkdirSync(sessionDir, { recursive: true });
-      }
-      cb(null, sessionDir);
+      // Store temporarily first, we'll move it after parsing
+      cb(null, CHUNKS_DIR);
     },
     filename: (req, file, cb) => {
-      const chunkIndex = req.body.chunkIndex;
-      cb(null, `chunk_${chunkIndex}`);
+      // Generate a temp filename, will be renamed after body is parsed
+      const tempName = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      cb(null, tempName);
     },
   }),
   limits: {
@@ -92,7 +89,21 @@ export async function registerRoutes(
       const { sessionId, chunkIndex } = req.body;
       
       if (!sessionId || chunkIndex === undefined) {
+        // Clean up temp file if body is invalid
+        if (req.file) {
+          await fs.unlink(req.file.path).catch(() => {});
+        }
         return res.status(400).json({ error: "Missing sessionId or chunkIndex" });
+      }
+
+      // Move the temp file to the correct session directory
+      if (req.file) {
+        const sessionDir = path.join(CHUNKS_DIR, sessionId);
+        if (!existsSync(sessionDir)) {
+          mkdirSync(sessionDir, { recursive: true });
+        }
+        const finalPath = path.join(sessionDir, `chunk_${chunkIndex}`);
+        await fs.rename(req.file.path, finalPath);
       }
 
       const session = await storage.markChunkUploaded(sessionId, parseInt(chunkIndex));
