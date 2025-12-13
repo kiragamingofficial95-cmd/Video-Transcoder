@@ -2,8 +2,9 @@ import { useState, useCallback, useRef } from "react";
 import type { UploadProgress, ChunkInfo, UploadSession } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 
-const CHUNK_SIZE = 10 * 1024 * 1024;
-const MAX_PARALLEL_CHUNKS = 3;
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better reliability
+const MAX_PARALLEL_CHUNKS = 2;
+const MAX_RETRIES = 3;
 
 interface UseUploadOptions {
   onComplete?: (videoId: string) => void;

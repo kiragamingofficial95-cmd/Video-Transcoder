@@ -17,7 +17,7 @@ const CHUNKS_DIR = path.join(STORAGE_DIR, "chunks");
 const UPLOADS_DIR = path.join(STORAGE_DIR, "uploads");
 const TRANSCODED_DIR = path.join(STORAGE_DIR, "transcoded");
 
-const CHUNK_SIZE = 10 * 1024 * 1024;
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better reliability
 
 [CHUNKS_DIR, UPLOADS_DIR, TRANSCODED_DIR].forEach(dir => {
   if (!existsSync(dir)) {
@@ -38,7 +38,7 @@ const chunkUpload = multer({
     },
   }),
   limits: {
-    fileSize: CHUNK_SIZE + 1024,
+    fileSize: CHUNK_SIZE + 1024 * 10, // Add buffer for form data overhead
   },
 });
 
