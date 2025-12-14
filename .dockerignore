@@ -1,0 +1,12 @@
+node_modules
+dist
+storage
+.git
+.gitignore
+*.log
+.env
+.env.*
+README.md
+.replit
+replit.nix
+replit.md
