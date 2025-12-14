@@ -3,8 +3,8 @@ import type { UploadProgress, ChunkInfo, UploadSession } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 
 const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better reliability
-const MAX_PARALLEL_CHUNKS = 2;
-const MAX_RETRIES = 3;
+const MAX_PARALLEL_CHUNKS = 1; // Sequential uploads for slow/unstable networks
+const MAX_RETRIES = 5; // More retries for network issues
 
 interface UseUploadOptions {
   onComplete?: (videoId: string) => void;
@@ -62,7 +62,7 @@ export function useUpload({ onComplete, onError }: UseUploadOptions = {}) {
 
         // Create a timeout controller for this specific request
         const timeoutController = new AbortController();
-        const timeoutId = setTimeout(() => timeoutController.abort(), 60000); // 60s timeout per chunk
+        const timeoutId = setTimeout(() => timeoutController.abort(), 180000); // 3 minute timeout per chunk for slow networks
 
         // Listen for main signal abort to also abort the timeout controller
         const abortHandler = () => timeoutController.abort();
