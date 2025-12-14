@@ -38,7 +38,10 @@ const chunkUpload = multer({
     },
   }),
   limits: {
-    fileSize: CHUNK_SIZE + 1024 * 10, // Add buffer for form data overhead
+    // CRITICAL: Allow CHUNK_SIZE + 128KB for multipart FormData overhead
+    // FormData encoding adds boundaries, headers, and metadata that can exceed 10KB
+    // Using 128KB buffer ensures even edge cases with long filenames are handled
+    fileSize: CHUNK_SIZE + 1024 * 128,
   },
 });
 
@@ -85,76 +88,97 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/upload/chunk", chunkUpload.single("chunk"), async (req: Request, res: Response) => {
-    try {
-      const { sessionId, chunkIndex } = req.body;
-      
-      if (!sessionId || chunkIndex === undefined) {
-        // Clean up temp file if body is invalid
+  // Multer error handler wrapper
+  const handleChunkUpload = (req: Request, res: Response, next: () => void) => {
+    chunkUpload.single("chunk")(req, res, (err: any) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          console.error("Chunk size limit exceeded:", err);
+          return res.status(413).json({ 
+            success: false, 
+            error: "Chunk size exceeds server limit. This should not happen - please contact support.",
+            code: "LIMIT_FILE_SIZE"
+          });
+        }
+        console.error("Multer error:", err);
+        return res.status(500).json({ success: false, error: `Upload error: ${err.message}` });
+      }
+      next();
+    });
+  };
+
+  app.post("/api/upload/chunk", (req: Request, res: Response) => {
+    handleChunkUpload(req, res, async () => {
+      try {
+        const { sessionId, chunkIndex } = req.body;
+        
+        if (!sessionId || chunkIndex === undefined) {
+          // Clean up temp file if body is invalid
+          if (req.file) {
+            await fs.unlink(req.file.path).catch(() => {});
+          }
+          return res.status(400).json({ success: false, error: "Missing sessionId or chunkIndex" });
+        }
+
+        // Validate that we actually received chunk data
+        if (!req.file) {
+          return res.status(400).json({ success: false, error: "No chunk data received" });
+        }
+
+        // Verify the chunk file has actual content
+        const chunkStats = statSync(req.file.path);
+        if (chunkStats.size === 0) {
+          await fs.unlink(req.file.path).catch(() => {});
+          return res.status(400).json({ success: false, error: "Empty chunk received" });
+        }
+
+        // Validate session exists before moving file
+        const existingSession = await storage.getUploadSession(sessionId);
+        if (!existingSession) {
+          await fs.unlink(req.file.path).catch(() => {});
+          return res.status(404).json({ success: false, error: "Session not found" });
+        }
+
+        // Validate chunk index is within expected range
+        const chunkIdx = parseInt(chunkIndex);
+        if (isNaN(chunkIdx) || chunkIdx < 0 || chunkIdx >= existingSession.totalChunks) {
+          await fs.unlink(req.file.path).catch(() => {});
+          return res.status(400).json({ success: false, error: `Invalid chunk index: ${chunkIndex}` });
+        }
+
+        // Move the temp file to the correct session directory
+        const sessionDir = path.join(CHUNKS_DIR, sessionId);
+        if (!existsSync(sessionDir)) {
+          mkdirSync(sessionDir, { recursive: true });
+        }
+        const finalPath = path.join(sessionDir, `chunk_${chunkIdx}`);
+        await fs.rename(req.file.path, finalPath);
+
+        // Verify the file was moved successfully
+        if (!existsSync(finalPath)) {
+          return res.status(500).json({ success: false, error: "Failed to save chunk" });
+        }
+
+        const session = await storage.markChunkUploaded(sessionId, chunkIdx);
+        if (!session) {
+          return res.status(404).json({ success: false, error: "Session not found" });
+        }
+
+        res.json({
+          success: true,
+          uploadedChunks: session.uploadedChunks.length,
+          totalChunks: session.totalChunks,
+          progress: (session.uploadedChunks.length / session.totalChunks) * 100,
+        });
+      } catch (error) {
+        console.error("Error uploading chunk:", error);
+        // Clean up temp file on error
         if (req.file) {
           await fs.unlink(req.file.path).catch(() => {});
         }
-        return res.status(400).json({ success: false, error: "Missing sessionId or chunkIndex" });
+        res.status(500).json({ success: false, error: "Failed to upload chunk" });
       }
-
-      // Validate that we actually received chunk data
-      if (!req.file) {
-        return res.status(400).json({ success: false, error: "No chunk data received" });
-      }
-
-      // Verify the chunk file has actual content
-      const chunkStats = statSync(req.file.path);
-      if (chunkStats.size === 0) {
-        await fs.unlink(req.file.path).catch(() => {});
-        return res.status(400).json({ success: false, error: "Empty chunk received" });
-      }
-
-      // Validate session exists before moving file
-      const existingSession = await storage.getUploadSession(sessionId);
-      if (!existingSession) {
-        await fs.unlink(req.file.path).catch(() => {});
-        return res.status(404).json({ success: false, error: "Session not found" });
-      }
-
-      // Validate chunk index is within expected range
-      const chunkIdx = parseInt(chunkIndex);
-      if (isNaN(chunkIdx) || chunkIdx < 0 || chunkIdx >= existingSession.totalChunks) {
-        await fs.unlink(req.file.path).catch(() => {});
-        return res.status(400).json({ success: false, error: `Invalid chunk index: ${chunkIndex}` });
-      }
-
-      // Move the temp file to the correct session directory
-      const sessionDir = path.join(CHUNKS_DIR, sessionId);
-      if (!existsSync(sessionDir)) {
-        mkdirSync(sessionDir, { recursive: true });
-      }
-      const finalPath = path.join(sessionDir, `chunk_${chunkIdx}`);
-      await fs.rename(req.file.path, finalPath);
-
-      // Verify the file was moved successfully
-      if (!existsSync(finalPath)) {
-        return res.status(500).json({ success: false, error: "Failed to save chunk" });
-      }
-
-      const session = await storage.markChunkUploaded(sessionId, chunkIdx);
-      if (!session) {
-        return res.status(404).json({ success: false, error: "Session not found" });
-      }
-
-      res.json({
-        success: true,
-        uploadedChunks: session.uploadedChunks.length,
-        totalChunks: session.totalChunks,
-        progress: (session.uploadedChunks.length / session.totalChunks) * 100,
-      });
-    } catch (error) {
-      console.error("Error uploading chunk:", error);
-      // Clean up temp file on error
-      if (req.file) {
-        await fs.unlink(req.file.path).catch(() => {});
-      }
-      res.status(500).json({ success: false, error: "Failed to upload chunk" });
-    }
+    });
   });
 
   app.post("/api/upload/complete", async (req: Request, res: Response) => {
