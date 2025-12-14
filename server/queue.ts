@@ -10,9 +10,12 @@ import { storage } from "./storage";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-// DEV_MODE: Skip Redis entirely for local development/demo
-// Set DEV_MODE=true or leave REDIS_URL unset to run in simulation mode
-const DEV_MODE = process.env.DEV_MODE === 'true' || !process.env.REDIS_URL;
+// IMPORTANT: Always use simulation mode (in-process transcoding) when using MemStorage
+// The BullMQ worker runs in a separate process and can't update in-memory storage
+// This ensures video status is properly updated after transcoding completes
+// Set USE_REDIS_QUEUE=true only if you have a shared database (PostgreSQL/MongoDB)
+const USE_REDIS_QUEUE = process.env.USE_REDIS_QUEUE === 'true';
+const DEV_MODE = !USE_REDIS_QUEUE || !process.env.REDIS_URL;
 
 let connection: IORedis | null = null;
 let transcodingQueue: Queue | null = null;

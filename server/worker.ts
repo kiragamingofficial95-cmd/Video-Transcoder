@@ -226,6 +226,9 @@ export function startWorker(): void {
   console.log("Transcoding worker started");
 }
 
-if (require.main === module) {
+// ES module compatible check for running as main module
+// Note: In most deployment scenarios, worker should be started via startWorker() from the main server
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
   startWorker();
 }
