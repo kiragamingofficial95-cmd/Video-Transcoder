@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { startWorker } from "./worker";
 import { createServer } from "http";
 
 const app = express();
@@ -93,6 +94,17 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      
+      // Start worker in same process if Redis is available (for single-service deployment)
+      const REDIS_URL = process.env.REDIS_URL;
+      const DEV_MODE = process.env.DEV_MODE === 'true' || !REDIS_URL;
+      
+      if (!DEV_MODE && REDIS_URL) {
+        log("Starting embedded worker for Redis queue processing...");
+        startWorker();
+      } else {
+        log("Running in DEV_MODE - transcoding runs in-process (no separate worker)");
+      }
     },
   );
 })();
