@@ -40,29 +40,68 @@ export function useUpload({ onComplete, onError }: UseUploadOptions = {}) {
     return chunks;
   };
 
-  const uploadChunk = async (
+  const uploadChunkWithRetry = async (
     file: File,
     chunk: ChunkInfo,
     sessionId: string,
     signal: AbortSignal
   ): Promise<boolean> => {
-    const formData = new FormData();
-    const blob = file.slice(chunk.start, chunk.end);
-    formData.append("chunk", blob);
-    formData.append("chunkIndex", String(chunk.index));
-    formData.append("sessionId", sessionId);
+    let lastError: Error | null = null;
+    
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        if (signal.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
 
-    const response = await fetch("/api/upload/chunk", {
-      method: "POST",
-      body: formData,
-      signal,
-    });
+        const formData = new FormData();
+        const blob = file.slice(chunk.start, chunk.end);
+        formData.append("chunk", blob);
+        formData.append("chunkIndex", String(chunk.index));
+        formData.append("sessionId", sessionId);
 
-    if (!response.ok) {
-      throw new Error(`Chunk upload failed: ${response.statusText}`);
+        // Create a timeout controller for this specific request
+        const timeoutController = new AbortController();
+        const timeoutId = setTimeout(() => timeoutController.abort(), 60000); // 60s timeout per chunk
+
+        // Combine signals: abort if main signal or timeout
+        const combinedSignal = signal.aborted ? signal : timeoutController.signal;
+
+        try {
+          const response = await fetch("/api/upload/chunk", {
+            method: "POST",
+            body: formData,
+            signal: combinedSignal,
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            throw new Error(`Chunk upload failed: ${response.status} ${response.statusText}`);
+          }
+
+          return true;
+        } catch (fetchError) {
+          clearTimeout(timeoutId);
+          throw fetchError;
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError" && signal.aborted) {
+          throw error; // Don't retry if main signal was aborted
+        }
+        
+        lastError = error instanceof Error ? error : new Error("Unknown error");
+        console.warn(`Chunk ${chunk.index} upload attempt ${attempt + 1}/${MAX_RETRIES} failed:`, lastError.message);
+        
+        if (attempt < MAX_RETRIES - 1) {
+          // Exponential backoff: 1s, 2s, 4s
+          const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
     }
-
-    return true;
+    
+    throw lastError || new Error(`Chunk ${chunk.index} upload failed after ${MAX_RETRIES} attempts`);
   };
 
   const updateProgress = (chunks: ChunkInfo[], file: File, videoId: string) => {
@@ -94,16 +133,32 @@ export function useUpload({ onComplete, onError }: UseUploadOptions = {}) {
     signal: AbortSignal
   ) => {
     const pendingChunks = chunks.filter(c => !c.uploaded);
-    let currentIndex = 0;
+    let workerError: Error | null = null;
+    const indexLock = { current: 0 }; // Prevent race conditions
 
     const uploadNextChunk = async (): Promise<void> => {
-      while (currentIndex < pendingChunks.length && !signal.aborted && !pausedRef.current) {
-        const chunk = pendingChunks[currentIndex++];
-        if (chunk) {
-          await uploadChunk(file, chunk, sessionId, signal);
-          chunk.uploaded = true;
-          uploadedBytesRef.current += chunk.size;
-          updateProgress([...chunks], file, videoId);
+      while (!signal.aborted && !pausedRef.current && !workerError) {
+        // Atomic index increment to prevent race conditions
+        const myIndex = indexLock.current++;
+        if (myIndex >= pendingChunks.length) {
+          break;
+        }
+        
+        const chunk = pendingChunks[myIndex];
+        if (chunk && !chunk.uploaded) {
+          try {
+            await uploadChunkWithRetry(file, chunk, sessionId, signal);
+            chunk.uploaded = true;
+            uploadedBytesRef.current += chunk.size;
+            updateProgress([...chunks], file, videoId);
+          } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") {
+              throw error; // Propagate abort errors
+            }
+            // Store the error and stop all workers
+            workerError = error instanceof Error ? error : new Error("Chunk upload failed");
+            throw workerError;
+          }
         }
       }
     };
@@ -112,7 +167,12 @@ export function useUpload({ onComplete, onError }: UseUploadOptions = {}) {
       .fill(null)
       .map(() => uploadNextChunk());
 
-    await Promise.all(workers);
+    // Wait for all workers, but throw the first error if any failed
+    const results = await Promise.allSettled(workers);
+    const failedResult = results.find(r => r.status === "rejected");
+    if (failedResult && failedResult.status === "rejected") {
+      throw failedResult.reason;
+    }
   };
 
   const startUpload = useCallback(async (file: File) => {
