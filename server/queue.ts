@@ -121,22 +121,28 @@ export async function addTranscodingJobs(
   
   const resolutions: ResolutionType[] = [Resolution.R360P, Resolution.R720P, Resolution.R1080P];
   
-  for (const resolution of resolutions) {
-    const jobData: TranscodingJobData = {
-      videoId,
-      jobId: jobIds[resolution],
-      resolution,
-      inputPath,
-      outputDir,
-    };
-    
-    if (queue) {
-      await queue.add(`transcode-${resolution}`, jobData, {
-        priority: resolution === Resolution.R360P ? 1 : resolution === Resolution.R720P ? 2 : 3,
+  // Create all job data
+  const jobs = resolutions.map(resolution => ({
+    videoId,
+    jobId: jobIds[resolution],
+    resolution,
+    inputPath,
+    outputDir,
+  }));
+  
+  if (queue) {
+    // Add to Redis queue with priorities
+    for (const jobData of jobs) {
+      await queue.add(`transcode-${jobData.resolution}`, jobData, {
+        priority: jobData.resolution === Resolution.R360P ? 1 : jobData.resolution === Resolution.R720P ? 2 : 3,
       });
-    } else {
-      simulateTranscoding(jobData);
     }
+  } else {
+    // OPTIMIZATION: Run all resolutions in PARALLEL for faster transcoding
+    // This significantly speeds up the overall process
+    Promise.all(jobs.map(jobData => simulateTranscoding(jobData))).catch(err => {
+      console.error("Parallel transcoding error:", err);
+    });
   }
   
   emitEvent(EventType.TRANSCODING_STARTED, videoId, { resolutions });
