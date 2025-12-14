@@ -64,36 +64,56 @@ export function useUpload({ onComplete, onError }: UseUploadOptions = {}) {
         const timeoutController = new AbortController();
         const timeoutId = setTimeout(() => timeoutController.abort(), 60000); // 60s timeout per chunk
 
-        // Combine signals: abort if main signal or timeout
-        const combinedSignal = signal.aborted ? signal : timeoutController.signal;
+        // Listen for main signal abort to also abort the timeout controller
+        const abortHandler = () => timeoutController.abort();
+        signal.addEventListener("abort", abortHandler);
 
         try {
           const response = await fetch("/api/upload/chunk", {
             method: "POST",
             body: formData,
-            signal: combinedSignal,
+            signal: timeoutController.signal,
           });
 
           clearTimeout(timeoutId);
+          signal.removeEventListener("abort", abortHandler);
 
           if (!response.ok) {
-            throw new Error(`Chunk upload failed: ${response.status} ${response.statusText}`);
+            const errorText = await response.text().catch(() => response.statusText);
+            throw new Error(`Chunk upload failed: ${response.status} - ${errorText}`);
+          }
+
+          const result = await response.json();
+          if (!result.success) {
+            throw new Error(result.error || "Chunk upload failed");
           }
 
           return true;
         } catch (fetchError) {
           clearTimeout(timeoutId);
+          signal.removeEventListener("abort", abortHandler);
           throw fetchError;
         }
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError" && signal.aborted) {
-          throw error; // Don't retry if main signal was aborted
+        // Check if this was caused by the main abort signal
+        if (signal.aborted) {
+          throw new DOMException("Aborted", "AbortError");
         }
         
-        lastError = error instanceof Error ? error : new Error("Unknown error");
+        if (error instanceof DOMException && error.name === "AbortError") {
+          // Timeout - don't treat as abort error, allow retry
+          lastError = new Error(`Chunk ${chunk.index} upload timed out`);
+        } else {
+          lastError = error instanceof Error ? error : new Error("Unknown error");
+        }
+        
         console.warn(`Chunk ${chunk.index} upload attempt ${attempt + 1}/${MAX_RETRIES} failed:`, lastError.message);
         
         if (attempt < MAX_RETRIES - 1) {
+          // Check again before waiting
+          if (signal.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           // Exponential backoff: 1s, 2s, 4s
           const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
           await new Promise(resolve => setTimeout(resolve, delay));
