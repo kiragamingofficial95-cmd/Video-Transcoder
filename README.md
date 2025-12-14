@@ -79,7 +79,7 @@ TRANSCODING FLOW:
 ## Key Features
 
 ### 1. Chunked Upload System
-- **10MB chunks** for optimal network efficiency
+- **2MB chunks** for better reliability on varying network conditions
 - **Parallel uploads** (3 concurrent chunks by default)
 - **Resumable** - resume from last successful chunk on failure
 - **Progress tracking** - real-time per-chunk and overall progress
@@ -409,7 +409,7 @@ This demo is designed to run within Replit's free-tier constraints:
 
 | Decision | Trade-off | Reasoning |
 |----------|-----------|-----------|
-| 10MB chunks | Memory vs speed | Balances browser memory with upload parallelism |
+| 2MB chunks | Reliability vs speed | Smaller chunks improve retry efficiency on unstable networks |
 | 3 parallel chunks | Bandwidth vs reliability | Prevents overwhelming connections |
 | 4s HLS segments | Latency vs seeking | Standard for live/VOD balance |
 | FFmpeg preset=fast | Quality vs speed | Prioritizes demo responsiveness |

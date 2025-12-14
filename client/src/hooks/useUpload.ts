@@ -3,7 +3,7 @@ import type { UploadProgress, ChunkInfo, UploadSession } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 
 const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better reliability
-const MAX_PARALLEL_CHUNKS = 1; // Sequential uploads for slow/unstable networks
+const MAX_PARALLEL_CHUNKS = 3; // Parallel uploads for faster throughput
 const MAX_RETRIES = 5; // More retries for network issues
 
 interface UseUploadOptions {
