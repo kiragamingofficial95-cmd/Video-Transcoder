@@ -11,6 +11,7 @@ export interface IStorage {
   
   createUploadSession(videoId: string, filename: string, totalSize: number, chunkSize: number): Promise<UploadSession>;
   getUploadSession(id: string): Promise<UploadSession | undefined>;
+  getActiveUploadSessions(): Promise<UploadSession[]>;
   updateUploadSession(id: string, updates: Partial<UploadSession>): Promise<UploadSession | undefined>;
   markChunkUploaded(sessionId: string, chunkIndex: number): Promise<UploadSession | undefined>;
   
@@ -101,6 +102,10 @@ export class MemStorage implements IStorage {
 
   async getUploadSession(id: string): Promise<UploadSession | undefined> {
     return this.uploadSessions.get(id);
+  }
+
+  async getActiveUploadSessions(): Promise<UploadSession[]> {
+    return Array.from(this.uploadSessions.values()).filter(s => s.status === "active");
   }
 
   async updateUploadSession(id: string, updates: Partial<UploadSession>): Promise<UploadSession | undefined> {

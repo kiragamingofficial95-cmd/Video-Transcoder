@@ -11,6 +11,15 @@ import { addTranscodingJobs, emitEvent, getQueueStats } from "./queue";
 import { createUploadSessionSchema } from "@shared/schema";
 import { VideoStatus, Resolution, EventType } from "@shared/schema";
 import type { ResolutionType } from "@shared/schema";
+import { 
+  cleanupTempFiles, 
+  cleanupOrphanedSessions, 
+  cleanupUploadFile,
+  cleanupTranscodedFiles,
+  runFullCleanup,
+  getStorageStats,
+  checkDiskSpace
+} from "./storage-cleanup";
 
 const STORAGE_DIR = process.env.STORAGE_DIR || "./storage";
 const CHUNKS_DIR = path.join(STORAGE_DIR, "chunks");
@@ -24,6 +33,41 @@ const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better reliability
     mkdirSync(dir, { recursive: true });
   }
 });
+
+async function getActiveSessionIds(): Promise<Set<string>> {
+  const sessions = await storage.getActiveUploadSessions();
+  return new Set(sessions.map(s => s.id));
+}
+
+async function getSessionExpiryMap(): Promise<Map<string, string>> {
+  const sessions = await storage.getActiveUploadSessions();
+  const map = new Map<string, string>();
+  for (const session of sessions) {
+    map.set(session.id, session.expiresAt);
+  }
+  return map;
+}
+
+async function ensureStorageSpace(): Promise<{ hasSpace: boolean; freeMB: number }> {
+  await cleanupTempFiles();
+  return checkDiskSpace();
+}
+
+runFullCleanup(new Set()).then(() => {
+  console.log("Initial storage cleanup completed");
+}).catch(err => {
+  console.error("Initial cleanup error:", err);
+});
+
+setInterval(async () => {
+  try {
+    const activeIds = await getActiveSessionIds();
+    const expiryMap = await getSessionExpiryMap();
+    await runFullCleanup(activeIds, expiryMap);
+  } catch (err) {
+    console.error("Periodic cleanup error:", err);
+  }
+}, 5 * 60 * 1000);
 
 const chunkUpload = multer({
   storage: multer.diskStorage({
@@ -88,22 +132,58 @@ export async function registerRoutes(
     }
   });
 
-  // Multer error handler wrapper
   const handleChunkUpload = (req: Request, res: Response, next: () => void) => {
-    chunkUpload.single("chunk")(req, res, (err: any) => {
-      if (err) {
-        if (err.code === "LIMIT_FILE_SIZE") {
-          console.error("Chunk size limit exceeded:", err);
-          return res.status(413).json({ 
-            success: false, 
-            error: "Chunk size exceeds server limit. This should not happen - please contact support.",
-            code: "LIMIT_FILE_SIZE"
-          });
-        }
-        console.error("Multer error:", err);
-        return res.status(500).json({ success: false, error: `Upload error: ${err.message}` });
+    ensureStorageSpace().then(({ hasSpace, freeMB }) => {
+      if (!hasSpace) {
+        return res.status(507).json({
+          success: false,
+          error: `Insufficient storage space (${freeMB.toFixed(1)}MB free). Please delete some videos to continue.`,
+          code: "STORAGE_FULL",
+          retryable: false
+        });
       }
-      next();
+      
+      chunkUpload.single("chunk")(req, res, async (err: any) => {
+        if (err) {
+          if (err.code === "LIMIT_FILE_SIZE") {
+            console.error("Chunk size limit exceeded:", err);
+            return res.status(413).json({ 
+              success: false, 
+              error: "Chunk size exceeds server limit. This should not happen - please contact support.",
+              code: "LIMIT_FILE_SIZE"
+            });
+          }
+          
+          if (err.errno === -122 || err.code === "EDQUOT" || (err.message && err.message.includes("-122"))) {
+            console.error("Disk quota exceeded, attempting cleanup:", err);
+            try {
+              const activeIds = await getActiveSessionIds();
+              await runFullCleanup(activeIds);
+            } catch (cleanupErr) {
+              console.error("Emergency cleanup failed:", cleanupErr);
+            }
+            return res.status(507).json({ 
+              success: false, 
+              error: "Storage space temporarily unavailable. Please try again in a few moments.",
+              code: "STORAGE_FULL",
+              retryable: true
+            });
+          }
+          
+          console.error("Multer error:", err);
+          return res.status(500).json({ success: false, error: `Upload error: ${err.message}` });
+        }
+        next();
+      });
+    }).catch((cleanupErr) => {
+      console.error("Pre-upload cleanup failed:", cleanupErr);
+      chunkUpload.single("chunk")(req, res, (err: any) => {
+        if (err) {
+          console.error("Multer error after failed cleanup:", err);
+          return res.status(500).json({ success: false, error: `Upload error: ${err.message}` });
+        }
+        next();
+      });
     });
   };
 
@@ -343,10 +423,8 @@ export async function registerRoutes(
     try {
       const videoId = req.params.id;
       
-      const videoDir = path.join(TRANSCODED_DIR, videoId);
-      if (existsSync(videoDir)) {
-        await fs.rm(videoDir, { recursive: true, force: true });
-      }
+      await cleanupTranscodedFiles(videoId);
+      await cleanupUploadFile(videoId);
 
       const deleted = await storage.deleteVideo(videoId);
       if (!deleted) {
@@ -357,6 +435,44 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting video:", error);
       res.status(500).json({ error: "Failed to delete video" });
+    }
+  });
+
+  app.post("/api/storage/cleanup", async (req: Request, res: Response) => {
+    try {
+      const activeIds = await getActiveSessionIds();
+      const result = await runFullCleanup(activeIds);
+      const stats = await getStorageStats();
+      res.json({ 
+        success: true, 
+        cleaned: result,
+        storage: {
+          totalMB: Math.round(stats.totalSize / 1024 / 1024),
+          chunksMB: Math.round(stats.chunksSize / 1024 / 1024),
+          uploadsMB: Math.round(stats.uploadsSize / 1024 / 1024),
+          transcodedMB: Math.round(stats.transcodedSize / 1024 / 1024),
+        }
+      });
+    } catch (error) {
+      console.error("Error during cleanup:", error);
+      res.status(500).json({ error: "Cleanup failed" });
+    }
+  });
+
+  app.get("/api/storage/stats", async (req: Request, res: Response) => {
+    try {
+      const stats = await getStorageStats();
+      res.json({
+        totalMB: Math.round(stats.totalSize / 1024 / 1024),
+        chunksMB: Math.round(stats.chunksSize / 1024 / 1024),
+        uploadsMB: Math.round(stats.uploadsSize / 1024 / 1024),
+        transcodedMB: Math.round(stats.transcodedSize / 1024 / 1024),
+        tempFiles: stats.tempFileCount,
+        activeSessions: stats.sessionDirCount,
+      });
+    } catch (error) {
+      console.error("Error getting storage stats:", error);
+      res.status(500).json({ error: "Failed to get storage stats" });
     }
   });
 
