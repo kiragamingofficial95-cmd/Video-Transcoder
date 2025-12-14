@@ -90,13 +90,13 @@ export async function cleanupOrphanedSessions(
 
 export async function checkDiskSpace(): Promise<{ hasSpace: boolean; freeMB: number }> {
   try {
-    const stats = await getStorageStats();
-    const usedMB = stats.totalSize / 1024 / 1024;
-    const estimatedFreeMB = Math.max(0, 500 - usedMB);
-    return { hasSpace: estimatedFreeMB >= MIN_FREE_SPACE_MB, freeMB: estimatedFreeMB };
+    const { execSync } = await import("child_process");
+    const dfOutput = execSync("df -m . 2>/dev/null | tail -1").toString();
+    const parts = dfOutput.trim().split(/\s+/);
+    const availMB = parseInt(parts[3], 10) || 10000;
+    return { hasSpace: availMB >= MIN_FREE_SPACE_MB, freeMB: availMB };
   } catch (error) {
-    console.error("Error checking disk space:", error);
-    return { hasSpace: true, freeMB: 100 };
+    return { hasSpace: true, freeMB: 10000 };
   }
 }
 
